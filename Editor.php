@@ -83,18 +83,17 @@ class Editor extends Ext {
 	 * 
 	 * @param array $http Typically $_POST, but can be any array used to carry
 	 *   an Editor payload
-	 * @param string $name The parameter name that the action should be read from.
 	 * @return string `Editor::ACTION_READ`, `Editor::ACTION_CREATE`,
 	 *   `Editor::ACTION_EDIT` or `Editor::ACTION_DELETE` indicating the request
 	 *   type.
 	 */
-	static public function action ( $http, $name='action' )
+	static public function action ( $http )
 	{
-		if ( ! isset( $http[$name] ) ) {
+		if ( ! isset( $http['action'] ) ) {
 			return self::ACTION_READ;
 		}
 
-		switch ( $http[$name] ) {
+		switch ( $http['action'] ) {
 			case 'create':
 				return self::ACTION_CREATE;
 
@@ -144,7 +143,7 @@ class Editor extends Ext {
 	 */
 
 	/** @var string */
-	public $version = '1.9.1';
+	public $version = '1.9.0';
 
 
 
@@ -215,27 +214,12 @@ class Editor extends Ext {
 	/** @var boolean Enable / disable delete on left joined tables */
 	private $_leftJoinRemove = false;
 
-	/** @var string Action name allowing for configuration */
-	private $_actionName = 'action';
-
+	private $_groupByField = null;
 
 
 	/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
 	 * Public methods
 	 */
-
-	/**
-	 * Get / set the action name to read in HTTP parameters. This can be useful
-	 * to set if you are using a framework that uses the default name of `action`
-	 * for something else (e.g. WordPress).
-	 *  @param string Value to set. If not given, then used as a getter.
-	 *  @return string|self Value, or self if used as a setter.
-	 */
-	public function actionName ( $_=null )
-	{
-		return $this->_getSet( $this->_actionName, $_ );
-	}
-
 
 	/**
 	 * Get the data constructed in this instance.
@@ -522,13 +506,14 @@ class Editor extends Ext {
 	 *      LEFT JOIN dept ON users.dept_id = dept.id
 	 *    </code>
 	 */
-	public function leftJoin ( $table, $field1, $operator, $field2 )
+	public function leftJoin ( $table, $field1, $operator, $field2, $inner = false )
 	{
 		$this->_leftJoin[] = array(
 			"table"    => $table,
 			"field1"   => $field1,
 			"field2"   => $field2,
-			"operator" => $operator
+			"operator" => $operator,
+			"inner"    => $inner,
 		);
 
 		return $this;
@@ -820,7 +805,7 @@ class Editor extends Ext {
 	public function validate ( &$errors, $data )
 	{
 		// Validation is only performed on create and edit
-		if ( $data[$this->_actionName] != "create" && $data[$this->_actionName] != "edit" ) {
+		if ( $data['action'] != "create" && $data['action'] != "edit" ) {
 			return true;
 		}
 
@@ -841,7 +826,7 @@ class Editor extends Ext {
 
 			// MJoin validation
 			for ( $i=0 ; $i<count($this->_join) ; $i++ ) {
-				$this->_join[$i]->validate( $errors, $this, $values, $data[$this->_actionName] );
+				$this->_join[$i]->validate( $errors, $this, $values, $data['action'] );
 			}
 		}
 
@@ -949,57 +934,49 @@ class Editor extends Ext {
 			"cancelled" => array()
 		);
 
-		$action = Editor::action($data);
 		$this->_processData = $data;
 		$this->_formData = isset($data['data']) ? $data['data'] : null;
 		$validators = $this->_validator;
 
-		// Sanity check that data isn't getting truncated as that can lead to data corruption
-		if ( count($data, COUNT_RECURSIVE) >= ini_get('max_input_vars') ) {
-			$this->_out['error'] = 'Too many rows edited at the same time (tech info: max_input_vars exceeded).';
+		if ( $this->_transaction ) {
+			$this->_db->transaction();
 		}
 
-		if ( ! $this->_out['error'] ) {
-			if ( $this->_transaction ) {
-				$this->_db->transaction();
-			}
+		$this->_prepJoin();
 
-			$this->_prepJoin();
+		if ( $validators ) {
+			for ( $i=0 ; $i<count($validators) ; $i++ ) {
+				$validator = $validators[$i];
+				$ret = $validator( $this, !isset($data['action']) ? self::ACTION_READ : $data['action'], $data );
 
-			if ( $validators ) {
-				for ( $i=0 ; $i<count($validators) ; $i++ ) {
-					$validator = $validators[$i];
-					$ret = $validator( $this, $action, $data );
-
-					if ( is_string($ret) ) {
-						$this->_out['error'] = $ret;
-						break;
-					}
+				if ( is_string($ret) ) {
+					$this->_out['error'] = $ret;
+					break;
 				}
 			}
 		}
 
 		if ( ! $this->_out['error'] ) {
-			if ( $action === Editor::ACTION_READ ) {
+			if ( ! isset($data['action']) ) {
 				/* Get data */
 				$this->_out = array_merge( $this->_out, $this->_get( null, $data ) );
 			}
-			else if ( $action === Editor::ACTION_UPLOAD ) {
+			else if ( $data['action'] == "upload" ) {
 				/* File upload */
 				$this->_upload( $data );
 			}
-			else if ( $action === Editor::ACTION_DELETE ) {
+			else if ( $data['action'] == "remove" ) {
 				/* Remove rows */
 				$this->_remove( $data );
 				$this->_fileClean();
 			}
-			else if ( $action === Editor::ACTION_CREATE || $action === Editor::ACTION_EDIT ) {
+			else {
 				/* Create or edit row */
 				// Pre events so they can occur before the validation
 				foreach ($data['data'] as $idSrc => &$values) {
 					$cancel = null;
 
-					if ( $action === Editor::ACTION_CREATE ) {
+					if ( $data['action'] == 'create' ) {
 						$cancel = $this->_trigger( 'preCreate', $values );
 					}
 					else {
@@ -1022,7 +999,7 @@ class Editor extends Ext {
 
 				if ( $valid ) {
 					foreach ($data['data'] as $id => &$values) {
-						$d = $action === Editor::ACTION_CREATE ?
+						$d = $data['action'] == "create" ?
 							$this->_insert( $values ) :
 							$this->_update( $id, $values );
 
@@ -1030,9 +1007,9 @@ class Editor extends Ext {
 							$this->_out['data'][] = $d;
 						}
 					}
-
-					$this->_fileClean();
 				}
+
+				$this->_fileClean();
 			}
 		}
 
@@ -1105,6 +1082,10 @@ class Editor extends Ext {
 
 		if ( $id !== null ) {
 			$query->where( $this->pkeyToArray( $id, true ) );
+		}
+
+		if ($this->_groupByField) {
+            $query->group($this->_groupByField);
 		}
 
 		$res = $query->exec();
@@ -1530,6 +1511,9 @@ class Editor extends Ext {
 		$this->_ssp_limit( $query, $http );
 		$this->_ssp_sort( $query, $http );
 		$this->_ssp_filter( $query, $http );
+		if ($this->_groupByField) {
+            $this->_ssp_group( $query, $http );
+        }
 
 		// Get the number of rows in the result set
 		$ssp_set_count = $this->_db
@@ -1605,8 +1589,13 @@ class Editor extends Ext {
 				);
 			}
 		}
+	
+	private function _ssp_group ( $query, $http )
+	{
+			$query->order(
+				$this->_ssp_field($this->_groupByField)
+			);
 	}
-
 
 	/**
 	 * Add DataTables' 'where' condition to a server-side processing query. This
@@ -1704,8 +1693,8 @@ class Editor extends Ext {
 		if ( count($this->_leftJoin) ) {
 			for ( $i=0, $ien=count($this->_leftJoin) ; $i<$ien ; $i++ ) {
 				$join = $this->_leftJoin[$i];
-
-				$query->join( $join['table'], $join['field1'].' '.$join['operator'].' '.$join['field2'], 'LEFT' );
+                $mode = $join['inner'] ? 'INNER' : 'LEFT';
+				$query->join( $join['table'], $join['field1'].' '.$join['operator'].' '.$join['field2'], $mode );
 			}
 		}
 	}
@@ -1958,35 +1947,16 @@ class Editor extends Ext {
 			$pkey = $this->_pkey;
 		}
 
-		$tableMatch = $this->_alias($table, 'alias');
-
 		// Check there is a field which has a set option for this table
 		$count = 0;
 
 		foreach ($this->_fields as $field) {
-			$fieldName = $field->dbField();
-			$fieldDots = substr_count( $fieldName, '.' );
-
-			if ( $fieldDots === 0 ) {
-				$count++;	
-			}
-			else if ( $fieldDots === 1 ) {
-				if (
-					$field->set() !== Field::SET_NONE &&
-					$this->_part( $fieldName, 'table' ) === $tableMatch
-				) {
-					$count++;
-				}
-			}
-			else {
-				// db link
-				// note that if the table name for the constructor uses a db part, we need to also have
-				// the fields using the db name as Editor doesn't do any conflict resolution.
-				$dbTable = $this->_part( $fieldName, 'db' ) .'.'. $this->_part( $fieldName, 'table' );
-
-				if ( $field->set() !== Field::SET_NONE && $dbTable === $table ) {
-					$count++;
-				}
+			if ( strpos( $field->dbField(), '.') === false || (
+					$this->_part( $field->dbField(), 'table' ) === $table &&
+					$field->set() !== Field::SET_NONE
+				)
+			) {
+				$count++;
 			}
 		}
 
@@ -2226,5 +2196,10 @@ class Editor extends Ext {
 			$this->_readTableNames :
 			$this->_table;
 	}
+	
+	public function group($field) {
+        $this->_groupByField = $field;
+        return $this;
+	}
+	
 }
-
