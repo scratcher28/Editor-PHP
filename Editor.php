@@ -1614,6 +1614,7 @@ class Editor extends Ext {
 				);
 			}
 		}
+	}
 	
 	private function _ssp_group ( $query, $http )
 	{
