@@ -104,6 +104,8 @@ class Query {
 	 */
 	protected $_order = array();
 
+	protected $_group = array();
+
 	/**
 	 * @var array
 	 * @internal
@@ -458,7 +460,7 @@ class Query {
 		}
 
 		if ( !is_array($order) ) {
-			$order = preg_split('/\,(?![^\(]*\))/',$order);
+			$order = explode(",", $order);
 		}
 
 		for ( $i=0 ; $i<count($order) ; $i++ ) {
@@ -481,6 +483,36 @@ class Query {
 		return $this;
 	}
 
+
+	public function group ( $group )
+	{
+		if ( $group === null ) {
+			return $this;
+		}
+
+		if ( !is_array($group) ) {
+			$group = explode(",", $group);
+		}
+
+		for ( $i=0 ; $i<count($group) ; $i++ ) {
+			// Simplify the white-space
+			$group[$i] = trim( preg_replace('/[\t ]+/', ' ', $group[$i]) );
+
+			// Find the identifier so we don't escape that
+			if ( strpos($group[$i], ' ') !== false ) {
+				$direction = strstr($group[$i], ' ');
+				$identifier = substr($group[$i], 0, - strlen($direction));
+			}
+			else {
+				$direction = '';
+				$identifier = $group[$i];
+			}
+
+			$this->_group[] = $this->_protect_identifiers( $identifier ).' '.$direction;
+		}
+
+		return $this;
+	}
 
 	/**
 	 * Set fields to a given value.
@@ -809,6 +841,19 @@ class Query {
 	}
 
 	/**
+	 * Create the GROUP BY string
+	 *  @return string
+	 *  @internal
+	 */
+	protected function _build_group()
+	{
+		if ( count( $this->_group ) > 0 ) {
+			return ' GROUP BY '.implode(', ', $this->_group).' ';
+		}
+		return '';
+	}	
+
+	/**
 	 * Create a set list
 	 *  @return string
 	 *  @internal
@@ -901,7 +946,7 @@ class Query {
 				// Nothing
 			}
 			else {
-				$condition .= $this->_where[$i]['operator'].' ';
+				$condition .= $this->_where[$i]['operator'];
 			}
 
 			if ( $this->_where[$i]['group'] !== null ) {
@@ -1053,6 +1098,7 @@ class Query {
 			.$this->_build_join()
 			.$this->_build_where()
 			.$this->_build_order()
+			.$this->_build_group()
 			.$this->_build_limit()
 		);
 
@@ -1075,6 +1121,7 @@ class Query {
 			.' FROM '.$this->_build_table()
 			.$this->_build_join()
 			.$this->_build_where()
+			.$this->_build_group()
 			.$this->_build_limit()
 		);
 
@@ -1132,23 +1179,12 @@ class Query {
 			}
 			else if ( $bind ) {
 				// Binding condition (i.e. escape data)
-				if ( $this->_dbHost->type === 'Postgres' && $op === 'like' ) {
-					// Postgres specific a it needs a case for string searching non-text data
-					$this->_where[] = array(
-						'operator' => $type,
-						'group'    => null,
-						'field'    => $this->_protect_identifiers($key),
-						'query'    => $this->_protect_identifiers($key).'::text ilike '.$this->_safe_bind(':where_'.$i)
-					);
-				}
-				else {
-					$this->_where[] = array(
-						'operator' => $type,
-						'group'    => null,
-						'field'    => $this->_protect_identifiers($key),
-						'query'    => $this->_protect_identifiers($key) .' '.$op.' '.$this->_safe_bind(':where_'.$i)
-					);
-				}
+				$this->_where[] = array(
+					'operator' => $type,
+					'group'    => null,
+					'field'    => $this->_protect_identifiers($key),
+					'query'    => $this->_protect_identifiers($key) .' '.$op.' '.$this->_safe_bind(':where_'.$i)
+				);
 				$this->bind( ':where_'.$i, $value );
 			}
 			else {
@@ -1176,5 +1212,3 @@ class Query {
 		);
 	}
 };
-
-
