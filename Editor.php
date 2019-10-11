@@ -83,17 +83,18 @@ class Editor extends Ext {
 	 * 
 	 * @param array $http Typically $_POST, but can be any array used to carry
 	 *   an Editor payload
+	 * @param string $name The parameter name that the action should be read from.
 	 * @return string `Editor::ACTION_READ`, `Editor::ACTION_CREATE`,
 	 *   `Editor::ACTION_EDIT` or `Editor::ACTION_DELETE` indicating the request
 	 *   type.
 	 */
-	static public function action ( $http )
+	static public function action ( $http, $name='action' )
 	{
-		if ( ! isset( $http['action'] ) ) {
+		if ( ! isset( $http[$name] ) ) {
 			return self::ACTION_READ;
 		}
 
-		switch ( $http['action'] ) {
+		switch ( $http[$name] ) {
 			case 'create':
 				return self::ACTION_CREATE;
 
@@ -143,7 +144,7 @@ class Editor extends Ext {
 	 */
 
 	/** @var string */
-	public $version = '1.9.0';
+	public $version = '1.9.1';
 
 
 
@@ -214,12 +215,28 @@ class Editor extends Ext {
 	/** @var boolean Enable / disable delete on left joined tables */
 	private $_leftJoinRemove = false;
 
+	/** @var string Action name allowing for configuration */
+	private $_actionName = 'action';
+	
 	private $_groupByField = null;
 
 
 	/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
 	 * Public methods
 	 */
+
+	/**
+	 * Get / set the action name to read in HTTP parameters. This can be useful
+	 * to set if you are using a framework that uses the default name of `action`
+	 * for something else (e.g. WordPress).
+	 *  @param string Value to set. If not given, then used as a getter.
+	 *  @return string|self Value, or self if used as a setter.
+	 */
+	public function actionName ( $_=null )
+	{
+		return $this->_getSet( $this->_actionName, $_ );
+	}
+
 
 	/**
 	 * Get the data constructed in this instance.
@@ -805,7 +822,7 @@ class Editor extends Ext {
 	public function validate ( &$errors, $data )
 	{
 		// Validation is only performed on create and edit
-		if ( $data['action'] != "create" && $data['action'] != "edit" ) {
+		if ( $data[$this->_actionName] != "create" && $data[$this->_actionName] != "edit" ) {
 			return true;
 		}
 
@@ -826,7 +843,7 @@ class Editor extends Ext {
 
 			// MJoin validation
 			for ( $i=0 ; $i<count($this->_join) ; $i++ ) {
-				$this->_join[$i]->validate( $errors, $this, $values, $data['action'] );
+				$this->_join[$i]->validate( $errors, $this, $values, $data[$this->_actionName] );
 			}
 		}
 
@@ -934,49 +951,57 @@ class Editor extends Ext {
 			"cancelled" => array()
 		);
 
+		$action = Editor::action($data);
 		$this->_processData = $data;
 		$this->_formData = isset($data['data']) ? $data['data'] : null;
 		$validators = $this->_validator;
 
-		if ( $this->_transaction ) {
-			$this->_db->transaction();
+		// Sanity check that data isn't getting truncated as that can lead to data corruption
+		if ( count($data, COUNT_RECURSIVE) >= ini_get('max_input_vars') ) {
+			$this->_out['error'] = 'Too many rows edited at the same time (tech info: max_input_vars exceeded).';
 		}
 
-		$this->_prepJoin();
+		if ( ! $this->_out['error'] ) {
+			if ( $this->_transaction ) {
+				$this->_db->transaction();
+			}
 
-		if ( $validators ) {
-			for ( $i=0 ; $i<count($validators) ; $i++ ) {
-				$validator = $validators[$i];
-				$ret = $validator( $this, !isset($data['action']) ? self::ACTION_READ : $data['action'], $data );
+			$this->_prepJoin();
 
-				if ( is_string($ret) ) {
-					$this->_out['error'] = $ret;
-					break;
+			if ( $validators ) {
+				for ( $i=0 ; $i<count($validators) ; $i++ ) {
+					$validator = $validators[$i];
+					$ret = $validator( $this, $action, $data );
+
+					if ( is_string($ret) ) {
+						$this->_out['error'] = $ret;
+						break;
+					}
 				}
 			}
 		}
 
 		if ( ! $this->_out['error'] ) {
-			if ( ! isset($data['action']) ) {
+			if ( $action === Editor::ACTION_READ ) {
 				/* Get data */
 				$this->_out = array_merge( $this->_out, $this->_get( null, $data ) );
 			}
-			else if ( $data['action'] == "upload" ) {
+			else if ( $action === Editor::ACTION_UPLOAD ) {
 				/* File upload */
 				$this->_upload( $data );
 			}
-			else if ( $data['action'] == "remove" ) {
+			else if ( $action === Editor::ACTION_DELETE ) {
 				/* Remove rows */
 				$this->_remove( $data );
 				$this->_fileClean();
 			}
-			else {
+			else if ( $action === Editor::ACTION_CREATE || $action === Editor::ACTION_EDIT ) {
 				/* Create or edit row */
 				// Pre events so they can occur before the validation
 				foreach ($data['data'] as $idSrc => &$values) {
 					$cancel = null;
 
-					if ( $data['action'] == 'create' ) {
+					if ( $action === Editor::ACTION_CREATE ) {
 						$cancel = $this->_trigger( 'preCreate', $values );
 					}
 					else {
@@ -999,7 +1024,7 @@ class Editor extends Ext {
 
 				if ( $valid ) {
 					foreach ($data['data'] as $id => &$values) {
-						$d = $data['action'] == "create" ?
+						$d = $action === Editor::ACTION_CREATE ?
 							$this->_insert( $values ) :
 							$this->_update( $id, $values );
 
@@ -1007,9 +1032,9 @@ class Editor extends Ext {
 							$this->_out['data'][] = $d;
 						}
 					}
-				}
 
-				$this->_fileClean();
+					$this->_fileClean();
+				}
 			}
 		}
 
@@ -1947,16 +1972,35 @@ class Editor extends Ext {
 			$pkey = $this->_pkey;
 		}
 
+		$tableMatch = $this->_alias($table, 'alias');
+
 		// Check there is a field which has a set option for this table
 		$count = 0;
 
 		foreach ($this->_fields as $field) {
-			if ( strpos( $field->dbField(), '.') === false || (
-					$this->_part( $field->dbField(), 'table' ) === $table &&
-					$field->set() !== Field::SET_NONE
-				)
-			) {
-				$count++;
+			$fieldName = $field->dbField();
+			$fieldDots = substr_count( $fieldName, '.' );
+
+			if ( $fieldDots === 0 ) {
+				$count++;	
+			}
+			else if ( $fieldDots === 1 ) {
+				if (
+					$field->set() !== Field::SET_NONE &&
+					$this->_part( $fieldName, 'table' ) === $tableMatch
+				) {
+					$count++;
+				}
+			}
+			else {
+				// db link
+				// note that if the table name for the constructor uses a db part, we need to also have
+				// the fields using the db name as Editor doesn't do any conflict resolution.
+				$dbTable = $this->_part( $fieldName, 'db' ) .'.'. $this->_part( $fieldName, 'table' );
+
+				if ( $field->set() !== Field::SET_NONE && $dbTable === $table ) {
+					$count++;
+				}
 			}
 		}
 
